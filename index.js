@@ -11,33 +11,13 @@ function debounce(fn, delay) {
   };
 }
 
-function setStorage(key, value) {
-  window.localStorage.setItem(key, JSON.stringify(value));
-}
-
-function loadCacheFromStorage() {
-  const map = new Map();
-  for (const key in window.localStorage) {
-    if (window.localStorage.hasOwnProperty(key)) {
-      map.set(key, JSON.parse(window.localStorage[key]));
-    }
-  }
-  return map;
-}
-
-const cacheMap = loadCacheFromStorage();
-
-function clearStorage() {
-  window.localStorage.clear();
-  cacheMap.clear();
-}
-
 const listData = [];
 const LIST_SIZE = 10;
 const FETCH_SIZE = 10;
 const FETCHING_THRESHOLD = 2;
 const DEFAULT_DOM_FACTOR = 3;
 const DOM_REFRESH_THRESHOLD = 5;
+const CACHE_NAME = 'homework';
 let isFetching = false;
 let mouseInList = false;
 let currHighlightFeature = null;
@@ -196,6 +176,7 @@ require([
     try {
       isFetching = true;
       const usedEnv = isFirstTime ? 'View update' : 'Scroll';
+      // When it's querying first screen data, reset the array, startIndex and scrollTop field
       if (isFirstTime) {
         listData.length = 0;
         listContainer.scrollTop = 0;
@@ -205,40 +186,36 @@ require([
       const currentObjIds = await layerView.queryObjectIds({
         geometry: view.extent,
       });
-      const idsNoCache = [];
-      // When index is in the range of list data & fetch size
-      // Get the index corresponding data from cache first
+
+      // Sort the objectid so we could use the cache better
+      currentObjIds.sort((a, b) => a - b);
+
+      const idsToQuery = [];
+      // Get objectid array for querying
       for (let i = listData.length, count = 0;
         i < currentObjIds.length && count < FETCH_SIZE;
         i += 1, count += 1) {
         const objectId = currentObjIds[i].toString();
-        if (cacheMap.has(objectId)) {
-          console.log(`[${usedEnv}] get data from cache`);
-          listData.push(cacheMap.get(objectId));
-        } else {
-          idsNoCache.push(objectId);
-        }
+        idsToQuery.push(objectId);
       }
 
       // Query attributes from server side when cache missing
-      if (idsNoCache.length > 0) {
+      if (idsToQuery.length > 0) {
         // Construct the where clause
-        const whereSQL = `objectid in (${idsNoCache.toString()})`;
+        const whereSQL = `objectid in (${idsToQuery.toString()})`;
         const { features } = await featureLayer.queryFeatures({
-          // Appoint query extent, where clause and fields(properties)
-          geometry: view.extent,
+          // Appoint where clause and fields(properties),
+          // DO NOT pass extent since we want use cache
           where: whereSQL,
           outFields: ['objectid', 'areaname', 'st', 'capital', 'pop2000'],
         });
         for (const feature of features) {
-          cacheMap.set(feature.attributes.objectid, feature.attributes);
-          // Update cache
-          setStorage(feature.attributes.objectid, feature.attributes);
           console.log(`[${usedEnv}] get data from response`);
-          listData.push(cacheMap.get(feature.attributes.objectid));
+          listData.push(feature.attributes);
         }
       }
 
+      // When fetch new data, ignore the list cache and update DOMs anyway
       refreshListDOM(false);
       isFetching = false;
     } catch (err) {
@@ -338,28 +315,53 @@ require([
    * Handler for clear cache button
    */
   const handleClear = () => {
-    // Clean up localStorage & mapCache at the same time
-    clearStorage();
-    // Refresh the page
-    window.location.reload();
+    if ('serviceWorker' in navigator) {
+      console.log('Found service work')
+      caches.keys().then(function(cacheNames) {
+        cacheNames.forEach(function(cacheName) {
+          // Only delete the related cache
+          if(cacheName === CACHE_NAME) {
+            console.log(`Delete cache: ${cacheName}`)
+            caches.delete(cacheName);
+          }
+        });
+        console.log('Service worker caches deleted.');
+        window.location.reload();
+      });
+    }
   };
 
   /**
    * Handler for window resize event, need to refresh DOM & update listHeight, itemHeight
    */
-  const handeWindowResize = () => {
+  const handleWindowResize = () => {
     refreshListDOM();
     // Update the list height and list item height
     listHeight = listContainer.offsetHeight;
     itemHeight = Math.ceil(listHeight / LIST_SIZE);
   }
+  /**
+   * Load service worker script
+   */
+  const serviceWorkerLoader = async () => {
+    try {
+      // Check whether service worker is supported
+      if ('serviceWorker' in navigator) {
+        await navigator.serviceWorker.register('/sw.js');
+        console.log('Service worker registered');
+      }
+    } catch (e) {
+      console.error('Service worker register failed', e);
+    }
+  };
 
   listContainer.addEventListener('scroll', debounce(handleListScroll, 300));
   listContainer.addEventListener('mouseover', handleListHover);
   listContainer.addEventListener('mouseout', handleListLeaving);
   listContainer.addEventListener('click', handleListItemClick);
 
-  window.addEventListener('resize', debounce(handeWindowResize, 500));
+  window.addEventListener('resize', debounce(handleWindowResize, 500));
+  window.addEventListener('load', serviceWorkerLoader);
 
   clearBtn.addEventListener('click', handleClear);
 
